@@ -1,10 +1,10 @@
-import { useState, useEffect } from "react";
-import { motion } from "framer-motion";
-import { Sparkles, ArrowRight, Copy, Check, Users, Plus, LogIn } from "lucide-react";
-import { useNavigate, useLocation } from "react-router-dom";
+import { useEffect, useState, type FormEvent } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { ArrowRight, Loader2, LogIn, MapPin, Plus, Search, Users, X } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
+import EventCard from "@/components/EventCard";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
-import EventCard from "@/components/EventCard";
 
 interface LandingEvent {
   id: string;
@@ -17,9 +17,19 @@ interface LandingEvent {
   description: string | null;
 }
 
+const normalizeInviteCode = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+const buildInviteCode = (name: string) => {
+  const base = normalizeInviteCode(name).slice(0, 12);
+  const suffix = Math.floor(1000 + Math.random() * 9000);
+  return base ? `${base}${suffix}` : "";
+};
+
 const Landing = () => {
   const { user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+
   const [city, setCity] = useState("");
   const [submittedCity, setSubmittedCity] = useState("");
   const [events, setEvents] = useState<LandingEvent[]>([]);
@@ -27,118 +37,102 @@ const Landing = () => {
   const [hasSearched, setHasSearched] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<LandingEvent | null>(null);
   const [showActionModal, setShowActionModal] = useState(false);
-
-  // Returning user state
-  const [userProfile, setUserProfile] = useState<{ display_name: string; emoji: string; location: string | null } | null>(null);
-
-  // Squad creation state
   const [squadName, setSquadName] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [codeError, setCodeError] = useState("");
-  const [copied, setCopied] = useState(false);
-  const [created, setCreated] = useState(false);
-  const [activePanel, setActivePanel] = useState<"none" | "create" | "join">("none");
-  const [pendingJoinCode, setPendingJoinCode] = useState<string | null>(null);
 
-  const location = useLocation();
-
-  // If the user lands on the page with an invite code stored in session storage or query params,
-  // prefill the join panel and explain what's happening.
   useEffect(() => {
-    const joinCodeFromSession = sessionStorage.getItem("join_squad_code");
-    if (joinCodeFromSession) {
-      setJoinCode(joinCodeFromSession);
-      setPendingJoinCode(joinCodeFromSession);
-      setActivePanel("join");
+    if (!authLoading && user) {
+      navigate("/dashboard", { replace: true });
+    }
+  }, [authLoading, user, navigate]);
+
+  useEffect(() => {
+    const sessionCode = normalizeInviteCode(sessionStorage.getItem("join_squad_code") ?? "");
+    if (sessionCode) {
+      setJoinCode(sessionCode);
     }
 
     const params = new URLSearchParams(location.search);
-    const invite = params.get("invite") || params.get("code");
-    if (invite) {
-      const normalized = invite.toUpperCase().replace(/[^A-Z0-9]/g, "");
-      if (normalized) {
-        sessionStorage.setItem("join_squad_code", normalized);
-        setJoinCode(normalized);
-        setPendingJoinCode(normalized);
-        setActivePanel("join");
+    const inviteCode = normalizeInviteCode(params.get("invite") ?? params.get("code") ?? "");
 
-        // Remove query param so refresh doesn't repeat the flow
-        const cleanUrl = window.location.pathname;
-        window.history.replaceState(null, "", cleanUrl);
-      }
-    }
-
-    const pendingRaw = sessionStorage.getItem("pending_squad");
-    if (pendingRaw) {
-      try {
-        const pending = JSON.parse(pendingRaw);
-        if (pending?.invite_code) {
-          setSquadName(pending.name || "");
-          setInviteCode(pending.invite_code);
-          setCreated(true);
-        }
-      } catch (e) {
-        // ignore invalid session state
-      }
+    if (inviteCode) {
+      sessionStorage.setItem("join_squad_code", inviteCode);
+      setJoinCode(inviteCode);
+      window.history.replaceState(null, "", window.location.pathname);
     }
   }, [location.search]);
 
-  const isLoggedIn = !!user;
+  const loadEventsForCity = async (nextCity: string) => {
+    setLoading(true);
+    setHasSearched(true);
+    setSubmittedCity(nextCity);
 
-  // For logged-in users: load profile and auto-populate location
-  useEffect(() => {
-    if (created) return;
-    const name = squadName.trim();
-    if (!name) { setInviteCode(""); return; }
-    const base = name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
-    const suffix = Math.floor(1000 + Math.random() * 9000);
-    setInviteCode(base ? `${base}${suffix}` : "");
-  }, [squadName, created]);
+    try {
+      const { error: scrapeError } = await supabase.functions.invoke("scrape-events", {
+        body: { location: nextCity },
+      });
 
-  useEffect(() => {
-    if (user) {
-      navigate("/dashboard", { replace: true });
+      if (scrapeError) {
+        console.error("Failed to refresh public events:", scrapeError);
+      }
+
+      const { data, error } = await supabase
+        .from("events")
+        .select("id, title, date, location, category, emoji, source_url, description")
+        .is("created_by", null)
+        .is("squad_id", null)
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        throw error;
+      }
+
+      setEvents((data ?? []) as LandingEvent[]);
+    } catch (error) {
+      console.error("Failed to load events:", error);
+      setEvents([]);
+    } finally {
+      setLoading(false);
     }
-  }, [user, navigate]);
+  };
 
-  const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!city.trim()) return;
-    await loadEventsForCity(city.trim());
+  const handleSearch = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const nextCity = city.trim();
+    if (!nextCity) return;
+    await loadEventsForCity(nextCity);
   };
 
   const handleEventClick = (event: LandingEvent) => {
-    if (isLoggedIn) {
-      // Logged-in users go straight to dashboard
-      navigate("/dashboard");
-      return;
-    }
     setSelectedEvent(event);
     setShowActionModal(true);
     setCodeError("");
     setSquadName("");
-    setJoinCode("");
   };
 
   const handleCreateSquad = () => {
-    if (!squadName.trim()) return;
-    const base = squadName.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
-    const suffix = Math.floor(1000 + Math.random() * 9000);
-    const code = `${base}${suffix}`;
-    sessionStorage.setItem("pending_squad", JSON.stringify({ name: squadName.trim(), invite_code: code }));
+    const trimmedName = squadName.trim();
+    if (!trimmedName) return;
+
+    sessionStorage.setItem(
+      "pending_squad",
+      JSON.stringify({ name: trimmedName, invite_code: buildInviteCode(trimmedName) })
+    );
     navigate("/auth");
   };
 
   const handleJoinSquad = () => {
-    const code = joinCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-    if (code.length < 4) { setCodeError("Code must be at least 4 characters"); return; }
-    sessionStorage.setItem("join_squad_code", code);
+    const normalizedCode = normalizeInviteCode(joinCode);
+
+    if (normalizedCode.length < 4) {
+      setCodeError("Code must be at least 4 characters");
+      return;
+    }
+
+    sessionStorage.setItem("join_squad_code", normalizedCode);
     navigate("/auth");
   };
-
-  useEffect(() => {
-    if (!authLoading && user) navigate("/dashboard", { replace: true });
-  }, [user, authLoading, navigate]);
 
   if (authLoading || user) {
     return (
@@ -150,46 +144,23 @@ const Landing = () => {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Hero */}
       <div className="relative overflow-hidden bg-primary px-4 pb-12 pt-16 text-center">
-        {/* Top bar for logged-in users */}
-        {isLoggedIn && userProfile && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="absolute right-4 top-4 flex items-center gap-3"
-          >
-            <span className="text-sm text-primary-foreground/80">
-              {userProfile.emoji} {userProfile.display_name}
-            </span>
-            <button
-              onClick={() => navigate("/dashboard")}
-              className="flex items-center gap-1.5 rounded-lg bg-primary-foreground/15 px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary-foreground/25 transition-colors"
-            >
-              <LayoutDashboard className="h-3.5 w-3.5" />
-              Dashboard
-            </button>
-          </motion.div>
-        )}
-
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="mx-auto max-w-lg"
+          className="mx-auto max-w-2xl"
         >
           <h1
-            className="mb-2 text-4xl font-bold tracking-tight text-primary-foreground md:text-5xl"
+            className="mb-3 text-4xl font-bold tracking-tight text-primary-foreground md:text-5xl"
             style={{ fontFamily: "var(--font-display)" }}
           >
-            {isLoggedIn ? `Hey ${userProfile?.display_name?.split(" ")[0] || "there"} 👋` : "Let's Hang IRL"}
+            Let&apos;s Hang IRL
           </h1>
-          <p className="mb-8 text-sm text-primary-foreground/70">
-            {isLoggedIn
-              ? "Here's what's happening near you this weekend"
-              : "Discover events near you and plan hangouts with your squad ✨"}
+          <p className="mb-8 text-sm text-primary-foreground/80 md:text-base">
+            Enter your location to discover public events nearby, then start or join a squad to make plans.
           </p>
 
-          <form onSubmit={handleSearch} className="flex gap-2">
+          <form onSubmit={handleSearch} className="flex flex-col gap-3 sm:flex-row">
             <div className="relative flex-1">
               <MapPin className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <input
@@ -203,7 +174,7 @@ const Landing = () => {
             <button
               type="submit"
               disabled={loading || !city.trim()}
-              className="flex items-center gap-2 rounded-xl bg-card px-5 py-3 text-sm font-medium text-foreground transition-all hover:bg-accent disabled:opacity-50"
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-card px-5 py-3 text-sm font-medium text-card-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
             >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
               Find Events
@@ -212,31 +183,27 @@ const Landing = () => {
         </motion.div>
       </div>
 
-      {/* Events Grid */}
       <div className="mx-auto max-w-5xl px-4 py-8">
         {loading && (
           <div className="flex flex-col items-center gap-3 py-20">
             <Loader2 className="h-8 w-8 animate-spin text-primary" />
-            <p className="text-sm text-muted-foreground">
-              Finding events near {submittedCity}...
-            </p>
+            <p className="text-sm text-muted-foreground">Finding events near {submittedCity}...</p>
           </div>
         )}
 
         {!loading && hasSearched && events.length === 0 && (
           <div className="py-20 text-center">
-            <p className="text-lg text-muted-foreground">No events found. Try a different city!</p>
+            <p className="text-lg text-muted-foreground">No events found. Try a different city.</p>
           </div>
         )}
 
         {!loading && events.length > 0 && (
           <>
             <p className="mb-6 text-sm text-muted-foreground">
-              {submittedCity ? `Events near ${submittedCity}` : "Upcoming events"}
-              {isLoggedIn ? " — tap to RSVP from your dashboard" : " — tap any event to get started"}
+              {submittedCity ? `Events near ${submittedCity}` : "Upcoming events"} — tap any event to get started.
             </p>
             <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-              {events.map((event, i) => (
+              {events.map((event, index) => (
                 <EventCard
                   key={event.id}
                   title={event.title}
@@ -247,7 +214,7 @@ const Landing = () => {
                   source_url={event.source_url}
                   description={event.description}
                   friends={[]}
-                  index={i}
+                  index={index}
                   onClick={() => handleEventClick(event)}
                 />
               ))}
@@ -257,60 +224,58 @@ const Landing = () => {
 
         {!hasSearched && !loading && (
           <div className="py-20 text-center">
-            <p className="text-lg text-muted-foreground">
-              Enter your city above to discover weekend events near you 🎉
-            </p>
+            <p className="text-lg text-muted-foreground">Enter your city above to discover public events near you.</p>
           </div>
         )}
       </div>
 
-      {/* Action Modal — only for anonymous users */}
       <AnimatePresence>
-        {showActionModal && !isLoggedIn && (
+        {showActionModal && selectedEvent && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/60 p-4"
             onClick={() => setShowActionModal(false)}
           >
             <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              initial={{ opacity: 0, scale: 0.96, y: 12 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              className="relative w-full max-w-sm rounded-2xl border border-border bg-card p-6"
+              exit={{ opacity: 0, scale: 0.96, y: 12 }}
+              className="relative w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-xl"
               onClick={(e) => e.stopPropagation()}
             >
               <button
+                type="button"
                 onClick={() => setShowActionModal(false)}
-                className="absolute right-3 top-3 rounded-full p-1 text-muted-foreground hover:bg-muted"
+                className="absolute right-3 top-3 rounded-full p-1 text-muted-foreground transition-colors hover:bg-muted"
+                aria-label="Close"
               >
                 <X className="h-4 w-4" />
               </button>
 
-              {selectedEvent && (
-                <div className="mb-5">
-                  <span className="text-3xl">{selectedEvent.emoji}</span>
-                  <h3
-                    className="mt-2 text-lg font-semibold text-foreground"
-                    style={{ fontFamily: "var(--font-display)" }}
-                  >
-                    {selectedEvent.title}
-                  </h3>
-                  <p className="text-xs text-muted-foreground">{selectedEvent.date} · {selectedEvent.location}</p>
-                </div>
-              )}
+              <div className="mb-5 pr-8">
+                <span className="text-3xl">{selectedEvent.emoji}</span>
+                <h2
+                  className="mt-2 text-xl font-semibold text-card-foreground"
+                  style={{ fontFamily: "var(--font-display)" }}
+                >
+                  {selectedEvent.title}
+                </h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {selectedEvent.date} · {selectedEvent.location}
+                </p>
+              </div>
 
               <p className="mb-4 text-sm text-muted-foreground">
-                Sign in or create a squad to RSVP and plan with friends
+                Start a squad, join one with an invite code, or sign in to make plans around this event.
               </p>
 
-              <div className="flex flex-col gap-3">
-                {/* Start a Squad */}
-                <div className="rounded-xl border border-border p-4">
-                  <div className="mb-2 flex items-center gap-2">
+              <div className="space-y-3">
+                <div className="rounded-xl border border-border bg-background p-4">
+                  <div className="mb-3 flex items-center gap-2">
                     <Plus className="h-4 w-4 text-primary" />
-                    <span className="text-sm font-semibold text-foreground" style={{ fontFamily: "var(--font-display)" }}>Start a New Squad</span>
+                    <span className="text-sm font-semibold text-foreground">Start a new squad</span>
                   </div>
                   <div className="flex gap-2">
                     <input
@@ -319,52 +284,54 @@ const Landing = () => {
                       onChange={(e) => setSquadName(e.target.value)}
                       placeholder="Squad name"
                       maxLength={50}
-                      className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                      className="flex-1 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                     />
                     <button
+                      type="button"
                       onClick={handleCreateSquad}
                       disabled={!squadName.trim()}
-                      className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                      className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      Go
+                      Continue
                     </button>
                   </div>
                 </div>
 
-          {/* Option 2: Join a Squad */}
-          <motion.div layout className="w-full">
-            <button
-              onClick={() => { setActivePanel(activePanel === "join" ? "none" : "join"); setCodeError(""); }}
-              className={`flex w-full items-center gap-4 rounded-2xl border p-5 text-left transition-all ${
-                activePanel === "join"
-                  ? "border-primary bg-primary/5 shadow-md"
-                  : "border-border bg-card hover:border-primary/40 hover:shadow-sm"
-              }`}
-            >
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent/40">
-                <Users className="h-6 w-6 text-accent-foreground" />
-              </div>
-              <div className="flex-1">
-                <p className="font-semibold text-foreground" style={{ fontFamily: "var(--font-display)" }}>
-                  {pendingJoinCode ? "You're invited!" : "Join a Squad"}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {pendingJoinCode
-                    ? "We kept your invite code — just sign in to join your squad."
-                    : "Got an invite code? Enter it here."}
-                </p>
-              </div>
-              <ArrowRight className={`h-4 w-4 text-muted-foreground transition-transform ${activePanel === "join" ? "rotate-90" : ""}`} />
-            </button>
-
-                {/* Divider */}
-                <div className="flex items-center gap-3">
-                  <div className="h-px flex-1 bg-border" />
-                  <span className="text-xs text-muted-foreground">or</span>
-                  <div className="h-px flex-1 bg-border" />
+                <div className="rounded-xl border border-border bg-background p-4">
+                  <div className="mb-3 flex items-center gap-2">
+                    <Users className="h-4 w-4 text-primary" />
+                    <span className="text-sm font-semibold text-foreground">Join a squad</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={joinCode}
+                      onChange={(e) => {
+                        setJoinCode(e.target.value);
+                        if (codeError) setCodeError("");
+                      }}
+                      placeholder="Invite code"
+                      className="flex-1 rounded-lg border border-border bg-card px-3 py-2 text-sm uppercase text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleJoinSquad}
+                      className="rounded-lg bg-secondary px-4 py-2 text-sm font-medium text-secondary-foreground transition-colors hover:bg-secondary/80"
+                    >
+                      Join
+                    </button>
+                  </div>
+                  {codeError && <p className="mt-2 text-xs text-destructive">{codeError}</p>}
                 </div>
-                <button type="submit" className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary py-3 font-medium text-primary-foreground hover:bg-primary/90">
-                  {pendingJoinCode ? "Sign in to join" : "Join Squad"} <ArrowRight className="h-4 w-4" />
+
+                <button
+                  type="button"
+                  onClick={() => navigate("/auth")}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary py-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                >
+                  <LogIn className="h-4 w-4" />
+                  Sign in
+                  <ArrowRight className="h-4 w-4" />
                 </button>
               </div>
             </motion.div>
