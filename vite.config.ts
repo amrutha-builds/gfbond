@@ -19,3 +19,8 @@ export default defineConfig(({ mode }) => ({
     },
   },
 }));
+
+export default defineConfig({
+  base: '/irlhangouts/',   // ← add this line
+  // ...rest of your config
+})
